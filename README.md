@@ -22,7 +22,7 @@ composer require andreaselia/laravel-api-to-postman
 Publish the config file:
 
 ```bash
-php artisan vendor:publish --provider="AndreasElia\PostmanGenerator\PostmanGeneratorServiceProvider" --tag="config"
+php artisan vendor:publish --provider="AndreasElia\PostmanGenerator\PostmanGeneratorServiceProvider" --tag="postman-config"
 ```
 
 ## Configuration
@@ -32,6 +32,8 @@ You can modify the `api-postman.php` config values:
 - `structured` - If you want folders to be generated based on route names.
 - `base_url` - The base URL for all of your endpoints.
 - `auth_middleware` - The middleware which wraps your authenticated API routes.
+- `enable_formdata` - Determines whether or not form data should be handled.
+- `formdata` - The key/values to requests for form data dummy information.
 
 ## Usage
 

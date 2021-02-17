@@ -28,4 +28,40 @@ return [
 
     'auth_middleware' => 'auth:api',
 
+    /*
+     * Headers.
+     *
+     * The headers applied to all routes within the collection.
+     */
+
+    'headers' => [
+        [
+            'key' => 'Accept',
+            'value' => 'application/json',
+        ],
+        [
+            'key' => 'Content-Type',
+            'value' => 'application/json',
+        ],
+    ],
+
+    /*
+     * Enable Form Data.
+     *
+     * Determines whether or not form data should be handled.
+     */
+
+    'enable_formdata' => false,
+
+    /*
+     * Form Data.
+     *
+     * The key/values to requests for form data dummy information.
+     */
+
+    'formdata' => [
+        // 'email' => 'john@example.com',
+        // 'password' => 'changeme',
+    ],
+
 ];
