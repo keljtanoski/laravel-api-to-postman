@@ -1,6 +1,6 @@
 <?php
 
-namespace AndreasElia\PostmanGenerator;
+namespace AndreasElia\PostmanGenerator\Commands;
 
 use Closure;
 use Illuminate\Console\Command;
@@ -8,10 +8,11 @@ use Illuminate\Contracts\Config\Repository;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Routing\Router;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use ReflectionClass;
 use ReflectionFunction;
 
-class ExportPostman extends Command
+class ExportPostmanCommand extends Command
 {
     /** @var string */
     protected $signature = 'export:postman {--bearer= : The bearer token to use on your endpoints}';
@@ -28,6 +29,12 @@ class ExportPostman extends Command
     /** @var array */
     protected $config;
 
+    /** @var null */
+    protected $filename;
+
+    /** @var string */
+    private $bearer;
+
     public function __construct(Router $router, Repository $config)
     {
         parent::__construct();
@@ -38,66 +45,71 @@ class ExportPostman extends Command
 
     public function handle(): void
     {
-        $bearer = $this->option('bearer') ?? false;
-
-        $filename = date('Y_m_d_His').'_postman';
-
-        $this->initStructure($filename);
-
-        if ($bearer) {
-            $this->structure['variable'][] = [
-                'key' => 'token',
-                'value' => $bearer,
-            ];
-        }
+        $this->setFilename();
+        $this->setBearerToken();
+        $this->initializeStructure();
 
         foreach ($this->router->getRoutes() as $route) {
-            $middleware = $route->middleware();
+            $methods = array_filter($route->methods(), fn ($value) => $value !== 'HEAD');
+            $middlewares = $route->gatherMiddleware();
 
-            foreach ($route->methods as $method) {
-                if ($method == 'HEAD' || empty($middleware) || $middleware[0] !== 'api') {
+            foreach ($methods as $method) {
+                $includedMiddleware = false;
+
+                foreach ($middlewares as $middleware) {
+                    if (in_array($middleware, $this->config['include_middleware'])) {
+                        $includedMiddleware = true;
+                    }
+                }
+
+                if (empty($middlewares) || ! $includedMiddleware) {
                     continue;
                 }
 
                 $requestRules = [];
 
-                if ($this->config['enable_formdata']) {
-                    $routeAction = $route->getAction();
+                $routeAction = $route->getAction();
 
-                    if ($routeAction['uses'] instanceof Closure) {
-                        $reflectionMethod = new ReflectionFunction($routeAction['uses']);
-                    } else {
-                        $routeData = explode('@', $routeAction['uses']);
-                        $reflection = new ReflectionClass($routeData[0]);
-                        $reflectionMethod = $reflection->getMethod($routeData[1]);
+                $reflectionMethod = $this->getReflectionMethod($routeAction);
+
+                if (! $reflectionMethod) {
+                    continue;
+                }
+
+                if ($this->config['enable_formdata']) {
+                    $rulesParameter = null;
+
+                    foreach ($reflectionMethod->getParameters() as $parameter) {
+                        if (! $parameterType = $parameter->getType()) {
+                            continue;
+                        }
+
+                        $requestClass = $parameterType->getName();
+
+                        if (class_exists($requestClass)) {
+                            $rulesParameter = new $requestClass();
+                        }
                     }
 
-                    $firstParameter = $reflectionMethod->getParameters()[0] ?? false;
+                    if ($rulesParameter && $rulesParameter instanceof FormRequest) {
+                        $requestRules = $rulesParameter->rules();
 
-                    if ($firstParameter) {
-                        $requestClass = $firstParameter->getType()->getName();
-                        $requestClass = new $requestClass();
-
-                        if ($requestClass instanceof FormRequest) {
-                            $requestRules = $requestClass->rules();
-
-                            $requestRules = array_keys($requestRules);
-                        }
+                        $requestRules = array_keys($requestRules);
                     }
                 }
 
                 $routeHeaders = $this->config['headers'];
 
-                if ($bearer && in_array($this->config['auth_middleware'], $middleware)) {
+                if ($this->bearer && in_array($this->config['auth_middleware'], $middlewares)) {
                     $routeHeaders[] = [
                         'key' => 'Authorization',
                         'value' => 'Bearer {{token}}',
                     ];
                 }
 
-                $request = $this->makeItem($route, $method, $routeHeaders, $requestRules);
+                $request = $this->makeRequest($route, $method, $routeHeaders, $requestRules);
 
-                if ($this->config['structured']) {
+                if ($this->isStructured()) {
                     $routeNames = $route->action['as'] ?? null;
 
                     if (! $routeNames) {
@@ -114,23 +126,38 @@ class ExportPostman extends Command
                         return ! is_null($value) && $value !== '';
                     });
 
-                    $destination = end($routeNames);
-
-                    $this->ensurePath($this->structure, $routeNames, $request, $destination);
+                    $this->buildTree($this->structure, $routeNames, $request);
                 } else {
                     $this->structure['item'][] = $request;
                 }
             }
         }
 
-        Storage::put($exportName = "$filename.json", json_encode($this->structure));
+        Storage::disk($this->config['disk'])->put($exportName = "postman/$this->filename", json_encode($this->structure));
 
         $this->info("Postman Collection Exported: $exportName");
     }
 
-    protected function ensurePath(array &$routes, array $segments, array $request, string $destination): void
+    protected function getReflectionMethod(array $routeAction): ?object
+    {
+        if ($routeAction['uses'] instanceof Closure) {
+            return new ReflectionFunction($routeAction['uses']);
+        }
+
+        $routeData = explode('@', $routeAction['uses']);
+        $reflection = new ReflectionClass($routeData[0]);
+
+        if (! $reflection->hasMethod($routeData[1])) {
+            return null;
+        }
+
+        return $reflection->getMethod($routeData[1]);
+    }
+
+    protected function buildTree(array &$routes, array $segments, array $request): void
     {
         $parent = &$routes;
+        $destination = end($segments);
 
         foreach ($segments as $segment) {
             $matched = false;
@@ -165,7 +192,7 @@ class ExportPostman extends Command
         }
     }
 
-    public function makeItem($route, $method, $routeHeaders, $requestRules)
+    public function makeRequest($route, $method, $routeHeaders, $requestRules)
     {
         $data = [
             'name' => $route->uri(),
@@ -199,7 +226,7 @@ class ExportPostman extends Command
         return $data;
     }
 
-    protected function initStructure(string $filename): void
+    protected function initializeStructure(): void
     {
         $this->structure = [
             'variable' => [
@@ -209,10 +236,36 @@ class ExportPostman extends Command
                 ],
             ],
             'info' => [
-                'name' => $filename,
+                'name' => $this->filename,
                 'schema' => 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json',
             ],
             'item' => [],
         ];
+
+        if ($this->bearer) {
+            $this->structure['variable'][] = [
+                'key' => 'token',
+                'value' => $this->bearer,
+            ];
+        }
+    }
+
+    protected function setFilename()
+    {
+        $this->filename = str_replace(
+            ['{timestamp}', '{app}'],
+            [date('Y_m_d_His'), Str::snake(config('app.name'))],
+            $this->config['filename']
+        );
+    }
+
+    protected function setBearerToken()
+    {
+        $this->bearer = $this->option('bearer') ?? null;
+    }
+
+    protected function isStructured()
+    {
+        return $this->config['structured'];
     }
 }
